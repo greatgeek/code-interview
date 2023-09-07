@@ -86,6 +86,112 @@ API Server 监控资源的状态变化的能力主要得益于 etcd，etcd 是 K
 
 所以，Watch 机制的核心是由 HTTP 长连接和 etcd 的 watch 功能共同实现的。
 
+## Service
+
+### service 与 endpoint 的关系
+
+Service：Service 是 Kubernetes 提供的一种抽象定义，它定义了一组 Pod 的逻辑集合以及访问这些 Pod 的策略。由于 Pod 可能会频繁地被创建和销毁，因此使用 Service 可以保证服务的稳定可用。Service 可以通过标签选择器来确定它需要代表的 Pod。
+
+Endpoints：Endpoints 是 Service 的一部分，通常由 kubernetes 自动维护。它包含了所有与 Service 对应的 Pod 的 IP 地址列表。当 Service 中定义的 Pod 发生变化的时候，比如有新的 Pod 被创建出来或者已经存在的 Pod 被销毁，对应的 Endpoints 列表也会自动更新。
+
+所以我们可以把它们的关系理解为：Endpoints 实现了 Service 和 Pod 之间的映射，它记录了 Service 下所有 Pod 的 IP 地址。Service 通过引用 Endpoints 的方式，将用户的请求转发到对应的 Pod 地址上，实现了服务的负载均衡和服务发现。此外，用户可以手动创建和管理 Endpoints，以在 Kubernetes 外部提供服务。
+
+使用以下命令可以看到该 service 后端的所有 endpoint。
+
+```bash
+kubectl describe svc xxx
+```
+
+### service 的负载均衡机制
+
+在 Kubernetes 中，Service 提供了简单的负载均衡机制。当一个 Service 有多个后端 Pod 时，对 Service 的调用将被均匀地分配到这些 Pod 上，实现负载均衡。
+
+这种负载均衡主要是通过 **kube-proxy** 实现的。kube-proxy 是 Kubernetes 节点上运行的网络代理，当有新的 Service 创建时，kube-proxy 会获取到这个 Service 对应的 Endpoints 列表（即后端 Pod 的 IP 地址），并将这些信息写入每个节点的 iptables 规则或者 ipvs 规则中。当一个请求发送到 Service 的 ClusterIP 或 NodePort 时，请求会被 kube-proxy 捕获并根据 iptables 或 ipvs 规则转发到一个 Endpoints 列表中的一项，实现负载均衡。
+
+需要明确的是，kube-proxy 提供的负载均衡只是将请求简单地均匀分配到每个后端 Pod，它不考虑每个 Pod 的负载情况，也不支持更复杂的负载均衡策略，例如基于会话的负载均衡或者基于权重的负载均衡。如果需要更复杂的负载均衡策略，通常需要借助于其他的负载均衡器，例如云服务提供商提供的 LoadBalancer 类型的 Service 或者使用 Ingress 控制器等。
+
+#### Kube-proxy 的代理模式
+
+kube-proxy 是 Kubernetes 集群中的一个关键组件，负责在每个节点上进行网络转发，实现了 Service 对 Pod 的负载均衡。kube-proxy 目前支持三种代理模式：userspace，iptables，和 ipvs。
+
+1. Userspace模式: 这是早期 kube-proxy 的默认模式。在该模式下，kube-proxy 会为每个 Service 创建一个监听端口，当请求来到这个端口时，kube-proxy 将选择一个后端 Pod 并将请求转发给它。此模式下，数据包需要在用户空间和内核空间之间多次切换，效率较低。
+
+2. iptables模式: 这是 kube-proxy 的默认模式。在此模式下，kube-proxy 不再转发流量，而是直接在内核空间的 iptables 中设置规则，利用内核对流量进行处理，性能相较于 userspace 模式较高。但是 iptables 模式因为需要遍历所有规则链表，当服务数目较大时，性能会受到影响。
+
+3. ipvs模式: 这是 kube-proxy 后来添加的一种模式，使用内核的 IPVS 功能对流量进行转发。IPVS 为每个服务维护了一个哈希表，因此无论后端服务数量有多少，查询效率都很高。在大规模服务数量下，性能比 iptables 模式有较大的提高。
+
+#### 会话保持机制
+
+sessionAffinity
+
+## StatefulSet
+
+### （1）网络标识
+
+#### 为什么要有这一行 serviceName: "nginx"
+
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: web
+spec:
+  serviceName: "nginx"
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.9.1
+        ports:
+        - containerPort: 80
+          name: web 
+```
+
+StatefulSet 与 Deployment 的唯一区别就是多了一行`serviceName: "nginx"`，为什么要有这一行呢？
+
+在 Kubernetes 中，StatefulSet 控制器的 spec 字段中有一个称为 serviceName 的属性。这个属性的值理应对应到 Kubernetes 集群中的一个已存在的 Service。
+
+在 StatefulSet 中，serviceName 属性的设定非常重要。主要有两个作用：
+
+1. **该服务用来为该 StatefulSet 中的每个 Pod 提供网络标识。**只有指定 serviceName，Pod才能具有稳定的 hostname 和 network domain。每个 Pod 的 hostname 被设定为 $(statefulset name)-$(ordinal)。这里的 ordinal 是 Pod 在 StatefulSet 中的编号（从0开始）。而network domain 是 $(service name).$(namespace).svc.cluster.local，实例化后，Pod 的完全限定域名就被设定为 $(podname).(governing service domain) ，例如 web-0.nginx.default.svc.cluster.local。
+
+2. 在有些情况下（例如，在执行领导者选举或执行对等识别等操作时），StatefulSet 中的每个 Pod 需要能够相互发现对方。通常，我们利用通过一个 headless service（就是指定的 serviceName 对应的服务）进行服务发现。
+
+因此，serviceName 属性主要用于 StatefulSet 中网络标识的设定和 Pod 间的服务发现。
+
+#### 如果  serviceName: "nginx" 对应的 nginx service 没有创建呢？
+
+如果你在创建StatefulSet前没有创建对应的Service（在你的例子中，对应的是名为“nginx”的Service），那么**StatefulSet仍然会被创建，Pod也将被启动，但这些Pod的网络标识（也就是其主机名和域名）将无法被正确设置。**
+
+在 Kubernetes 中，StatefulSet 依赖于 Kubernetes 的 DNS 服务来提供网络标识，而这是通过关联的 Service 来实现的。因此，你的Pod可以运行，但是它们在网络上的名称将无法正常使用。所以，在应用需要依赖Pod的网络标识来进行通信或者执行其它操作的场景下，这样的设置将会导致问题。
+
+更为重要的是，如果你的应用基于Pods之间能互相发现（例如，在一些分布式应用中，Pods需要彼此发现以进行领导人选举或其他协作行为），那么未创建对应的 Headless Service 将会直接导致应用无法正常工作。因为，在这种情况下，Pods通常会试图通过 Kubernetes 的 DNS 服务去查找其它的族群成员，但只有在对应的 Service 创建好后它们才能被正确解析。
+
+总的来说，如果没有创建 StatefulSet 对应的 Service，StatefulSet 仍将被创建并且其Pod也会启动运行。然而，由于网络标识无法正确设置，以及 Pod 无法进行服务发现等原因，这将可能导致你的应用无法正常工作。因此，除非对你的应用来说这些并不重要，否则在创建 StatefulSet 之前最好始终先创建好对应的 Service。
+
+### （ 2）存储状态
+
+当你把一个 StatefulSet 的 Pod（比如 web-0）删除之后，这个 Pod 对应的 PVC 和 PV 并不会被删除，而这个 Volume 里已经写入的数据也依然会保存在远程存储服务里。此时，StatefulSet 控制器发现，一个名叫 web-0 的 Pod 消失了。所以，控制器会重新创建一个新的、名字还是 web-0 的 Pod，来“纠正”这种不一致的情况。
+
+需要注意的是，在这个新的 Pod 对象的定义里，它声明使用的是 PVC 的名字还是 www-web-0。这个 PVC 的定义仍然来自 PVC 模板（volumeClaim Templates），这是 StatefulSet 创建 Pod 的标准流程。所以，在这个新的 web-0 Pod 被创建出来之后，Kubernetes 为它查找名叫 www-web-0 的 PVC 时，就会直接找到旧 Pod 遗留下来的同名 PVC，进而找到跟这个 PVC 绑定的 PV。这样新的 Pod 就可以挂载到旧 Pod 对应的那个 Volume，并且获取保存在 Volume 里的数据了。通过这种方式，Kubernetes 的 StatefulSet 就实现了对应用存储状态的管理。
+
+### StatefulSet 的工作原理
+
+**首先，StatefulSet 的控制器直接管理的是 Pod。**这是因为 StatefulSet 里的不同 Pod 实例不再像ReplicaSet 中那样都是完全一样的，而是有了细微区别。比如，每个 Pod 的 hostname、名字等都不同，都携带了编号。而 StatefulSet 通过在 Pod 的名字里加上事先约定好的编号来区分这些实例。
+
+**其次，Kubernetes 通过 Headless Service 为这些有编号的 Pod，在 DNS 服务器中生成带有相同编号的 DNS 记录。**只要 StatefulSet 能够保证这些 Pod 名字里的编号不变，那么 Service 里类似于 web-0.nginx.default.svc.cluster.local 这样的 DNS 记录就不会变，而这条记录解析出来的 Pod 的 IP 地址，会随着后端 Pod 的删除和重建而自动更新。这当然是 Service 机制本身的能力，不需要 StatefulSet 操心。
+
+**最后，StatefulSet 还为每一个 Pod 分配并创建一个相同编号的 PVC。**这样，Kubernetes 就可以通过 Persistent Volume 机制为这个 PVC 绑定对应的 PV，从而保证了每个 Pod 都拥有一个独立的 Volume。
+
+在这种情况下，即使 Pod 被删除，它对应的 PVC 和 PV 依然会保留下来。所以当这个 Pod 被重新创建出来之后，Kubernetes 会为它找到编号相同的 PVC，挂载这个 PVC 对应的 Volume，从而获取以前保存在 Volume 里的数据。
+
 ## etcd
 
 ### 详细说明一下 Raft 协议
