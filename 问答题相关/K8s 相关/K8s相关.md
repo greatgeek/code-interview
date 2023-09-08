@@ -86,6 +86,100 @@ API Server 监控资源的状态变化的能力主要得益于 etcd，etcd 是 K
 
 所以，Watch 机制的核心是由 HTTP 长连接和 etcd 的 watch 功能共同实现的。
 
+### CNI，CSI，CRI
+
+1. CNI（Container Network Interface）
+
+CNI是一种通用的插件式网络解决方案，它定义了容器运行时（如Docker，Podman等）和网络插件之间的接口，以便为容器创建和配置网络。实际上，CNI插件负责创建并连接网络命名空间，向Pod分配IP地址，并在节点中设置路由规则。例如，Calico，Flannel，Weave等都是CNI插件。
+
+2. CSI（Container Storage Interface）
+
+CSI旨在定义一种标准化的机制，以便容器管理系统（如Kubernetes）如何暴露任何存储系统的抽象。简单的说，CSI插件允许容器管理系统像Kubernetes访问底层的存储系统，比如AWS EBS，Google Cloud Persistent Disk，Ceph等。CSI插件负责将存储卷挂载到Kubernetes Pod中，以便Pod可以使用这些存储。
+
+3. CRI（Container Runtime Interface）
+
+CRI旨在定义容器运行时应如何与Kubernetes一起工作，以便在Pod中运行容器。CRI定义了一套标准的gRPC接口，这些接口允许Kubernetes kubelet与容器运行时进行通信，以管理容器生命周期。例如，当Kubernetes需要在Pod中启动一个新的容器时，它将会使用CRI接口请求容器运行时（如Docker，containerd或cri-o）创建并启动该容器。
+
+### K8s 网络原理
+
+![宿主机上不同容器通过网桥进行通信的示意图](K8s相关.assets/image-20230907194218400-4086941-4086984.png)
+
+在默认情况下被限制在 Network Namespace 里的容器进程，实际上是通过 Veth Pair 设备+宿主机网桥的方式，实现了跟其他容器的数据交换的。
+
+![访问宿主机上容器的 IP 地址的示意图](K8s相关.assets/image-20230907194618640-4087180.png)
+
+当你在一台宿主机上访问该宿主机上的容器 IP 地址时，这个请求的数据包也是先根据路由规则到达 docker0 网桥，然后转发到对应的 Veth Pair 设备，最后出现在容器里。
+
+![容器连接到其他宿主机的过程示意图](K8s相关.assets/image-20230907195653099-4087816.png)
+
+当一个容器试图连接其他宿主机时，比如 ping 10.168.0.3，它发出的请求数据包首先经过 docker0 网桥出现在宿主机上，然后根据宿主机的路由表里的直连规则（10.168.0.0/24 via eth0），对 10.168.0.3 的访问请求就会交给宿主机的 eth0 处理。所以接下来，这个数据包就会出现在宿主机的 eth0网卡转发到宿主机网络上，最终到达10.168.0.3对应的宿主机上。
+
+当容器无法连通“外网”时，应该先试试 docker0 网桥，然后再查看跟 docker0 和 Veth Pair 设备相关的 iptables 规则是否有异常，往往能够找到问题的答案。
+
+![整个集群里的容器网络](K8s相关.assets/image-20230907201207026-4088744.png)
+
+这个覆盖网络可以由每台宿主机上的一个“特殊网桥”共同组成。比如，当 Node 1 上的容器 1 要访问 Node 2 上的容器 3时，Node 1 上的“特殊网桥 ”在收到数据包之后，能够通过某种方式把数据包发送到正确的宿主机，比如 Node 2 上。而 Node 2 上的“特殊网桥”在收到数据后，也能够通过某种方式把数据包转发给正确的容器，比如容器 3。
+
+#### Flannel 项目
+
+真正提供容器网络功能的 Flannel 后端实现为：1. VXLAN；2.host-gw；3.UDP；
+
+##### UDP 模式
+
+![基于 Flannel UDP模式的跨主机通信的基本示意图](K8s相关.assets/image-20230907203427185.png)
+
+Flannel UDP 模式提供的其实是一个三层的覆盖网络：它首先对发出端的 IP 包进行 UDP 封装，然后在接收端进行解封装拿到原始的 IP 包，接着把这个 IP 包转发给目标容器。这就好比，Flannel 在不同宿主机上的两个容器之间打通了一条“隧道”，使得这两个容器可以直接使用 IP 地址进行通信，而无须关心容器和宿主机的分布情况。
+
+![3 次用户态与内核态之间的数据复制](K8s相关.assets/image-20230907204823146-4090933.png)
+
+第一次，用户态的容器进程发出的 IP 包经过 docker0 网桥进入内核态；第二次，IP 包根据路由表进入 TUN（flannel0）设备，从而回到用户态的 flanneld 进程；第三次，flanneld 进行 UDP 封包之后重新进入内核态，将 UDP 包通过宿主机的 eth0 发出去。
+
+此外，还可以看到，Flannel 进行 UDP 封装和解封的过程也都是在用户态完成的。在 Linux 操作系统中，上述上下文切换和用户态操作的代价较高，这也正是造成 Flannel UDP 模式性能不佳的主要原因。
+
+所以，进行系统经编程时，有一个非常重要的优先原则：减少用户态到内核态的切换次数，并且把核心的处理逻辑都放在内核态进行。
+
+##### VXLAN 模式
+
+
+
+#### K8s 网络模型与 CNI 网络插件
+
+Kubernetes通过一个叫作 CNI 的接口维护了一个单独的网桥来代替 docker0。这个网桥叫作 CNI 网桥，它在宿主机上的默认设备名称是 cni0。
+
+Kubernetes 之所以要设置这样一个与 docker0网桥功能几乎相同的 CNI 网桥，有两个主要原因。
+
+（1）Kubernetes 项目并没有使用 Docker的网络模型（CNM），所以它并不希望，也不具备配置 docker0网桥的能力。
+
+（2）这还与 Kubernetes 如何配置 Pod，也就是 Infra 容器的 Network Namespace 密切相关。Kubernetes 创建 Pod 的第一步，就是创建并启动一个 Infra 容器，用来“hold”这个 Pod 的 Network Namespace。
+
+所以，CNI 的设计思想就是，Kubernetes 在启动 Infra容器之后，就可以直接调用 CNI 网络插件，为这个 Infra 容器的 Network Namespace 配置符合预期的网络栈（网卡、回环设备、路由表和 iptables 规则）。
+
+##### kube-proxy 与 cni 插件之间的交互关系
+
+kube-proxy和CNI插件是Kubernetes中的网络组件，它们之间没有直接的交互，但它们共同工作以支持Kubernetes中的网络流量路由。
+
+kube-proxy是Kubernetes中的每个节点上运行的网络代理，它实现了Kubernetes Service的概念。kube-proxy监听Kubernetes API服务器中服务和Endpoints对象的变化，然后根据这些变化实现网络路由。比如，一个服务可能有多个pod副本，这时kube-proxy就会代理这个服务的所有流量，然后将每个连接均匀分发到这些pod副本上。对于TCP和UDP流量，kube-proxy可以执行基于sessionAffinity的负载均衡。
+
+CNI (Container Network Interface)插件在Kubernetes中用来处理Pod网络的设置和清理。当一个pod被创建或销毁时，Kubernetes调用CNI插件来设置或清理pod的网络。CNI插件可以负责分配IP地址给pod，创建和配置网络设备，以及设置路由规则等。
+
+虽然kube-proxy和CNI插件没有直接交互，但它们共同工作以实现Kubernetes的网络功能。在实际工作中，kube-proxy负责服务发现和流量转发，而CNI插件则负责管理Pod网络，包括IP地址分配、网络设备的创建和配置等。总的来说，在网络流量中，kube-proxy和CNI插件各自承担了不同角色，他们共同确保了Kubernetes服务数据包准确高效的到达相应的目标。
+
+##### kube-proxy和CNI插件分别负责哪些网络功能？
+
+kube-proxy和CNI插件都是Kubernetes中支持网络通信的重要组件，但他们各自负责的网络功能是不同的：
+
+kube-proxy：kube-proxy 是 Kubernetes 的网络代理，主要负责集群内服务的网络通信。kube-proxy 在每个 Kubernetes 节点上运行，监听集群中 Services 和 Endpoints 的变化，并相应地维护和更新网络规则，从而实现：
+- 服务发现： kube-proxy 为集群中的每个 Service 创建虚拟 IP，并将来自该 IP 的请求转发到后端的 Pods。
+- 负载均衡： 当多个 Pods 提供同一个服务时，kube-proxy 会在它们之间进行负载均衡，确保网络流量的均衡分配。
+
+CNI（Container Network Interface) 插件： CNI插件主要负责Pod与Pod之间和Pod与Node之间的网络通信。当一个Pod被创建时，Kubernetes会调用相应的CNI插件，进行如下操作：
+- 网络隔离：每个Pod具有自己独立的网络命名空间，与其他Pod彼此隔离。
+- IP地址管理（IPAM）： 为Pod配置并分配IP地址。
+- 网络路由设置： 在每个节点上配置网络路由规则，确保不同节点上的Pod之间能够进行网络通信。
+- DNS配置： 对Pod中的/etc/resolv.conf进行配置，以便Pod可以通过DNS名解析集群内的Service。
+
+总的来说，在Kubernetes中，kube-proxy负责服务发现和负载均衡，而CNI插件则负责Pod的网络设置和管理。
+
 ## Service
 
 ### service 与 endpoint 的关系
