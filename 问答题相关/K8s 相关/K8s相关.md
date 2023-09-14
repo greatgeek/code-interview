@@ -218,6 +218,56 @@ kube-proxy 是 Kubernetes 集群中的一个关键组件，负责在每个节点
 
 sessionAffinity
 
+### 创建一个 service 的全流程
+
+在Kubernetes中，Service是一种抽象，它定义了一个逻辑的Pods集合以及访问这些Pods的策略。Service实质上是一组规则和配置，存储在 etcd 中。
+
+#### 1.用户操作和API Server
+
+- 当你执行`kubectl apply -f my-service.yaml`，`kubectl` CLI会将Service的YAML配置文件发送到Kubernetes API Server。
+- API Server会验证该YAML文件，然后将其状态存储在etcd数据存储中。
+
+#### 2. Service Controller
+
+Service Controller 主要负责处理 `LoadBalancer` 类型的 Service 对象，并不对所有类型的 Service 进行操作。当一个 Service 的类型被设置为 `LoadBalancer`，Service Controller 将进行以下一系列操作：
+
+1. **云负载均衡器 Provisioning**：如果 Kubernetes 集群运行在支持 LoadBalancer 的云环境中（例如 AWS, GCP, Azure等），Service Controller 会向云提供商发起请求，要求为该 Service 创建一个新的负载均衡器。
+2. **端口和协议配置**：基于 Service 对象的配置（例如 `spec.ports` 字段），Service Controller 会设置负载均衡器以便正确地转发流量到集群的 NodePort 或 Pod。
+3. **健康检查**：根据需要，Service Controller 可能还会配置健康检查以确认 Pod 是否准备好接收流量。
+4. **更新 Service 对象**：一旦负载均衡器创建成功，并分配了一个公共 IP 地址或 DNS 名称，Service Controller 会更新 Kubernetes 中的 Service 对象，特别是它的 `status.loadBalancer.ingress` 字段。
+5. **清理资源**：如果一个 LoadBalancer 类型的 Service 被删除或更改，Service Controller 负责清理旧的负载均衡器资源。
+
+这样，Service Controller 主要负责维护 `LoadBalancer` 类型的 Service 和实际云提供商之间的接口，而不直接涉及 ClusterIP 或 NodePort 类型的 Service。这些类型的 Service 通常由 kube-proxy 和 Endpoints Controller 来管理和维护。
+
+#### 3. Endpoints Controller
+
+- Endpoints Controller会根据Service的`selector`字段查找匹配的Pods。
+- 找到匹配的Pods后，它会创建或更新一个名为“Endpoints”的对象，该对象包含了这些Pods的IP地址。
+
+#### 4. kube-proxy 和 IPTables / IPVS
+
+- kube-proxy在每个节点上运行，它会监控API Server以获取Service和Endpoints的更改。
+- 当Service或Endpoints发生变化时，kube-proxy会更新节点上的IPTables或IPVS规则，以确保流量能被正确地路由到目标Pod。
+
+#### 5. Service类型和展示
+
+- Service的 `type`字段（如ClusterIP、NodePort、LoadBalancer）决定了如何暴露这个Service。
+  - **ClusterIP**：只在集群内部可访问。
+  - **NodePort**：在每个节点上开放一个端口，使得Service可以从集群外部访问。
+  - **LoadBalancer**：使用云提供商的负载均衡器，使得Service可以从外部网络访问。
+
+#### 6. DNS解析
+
+- Kubernetes的DNS服务（通常是CoreDNS）会根据新创建的Service生成一个DNS记录。
+- 这允许集群内的其他Pods使用DNS名称（例如`my-service.default.svc.cluster.local`）来访问这个Service。
+
+#### 7. 流量路由
+
+- 当一个请求发送到Service时，根据IPTables或IPVS规则和Endpoints列表，请求会被路由到一个后端的Pod。
+- 如果配置了Session Affinity或其他高级功能，kube-proxy会按照相应规则进行路由。
+
+通过这个全流程，Kubernetes能够确保Service不仅作为一个逻辑单元存在，还能进行有效的流量路由和负载均衡。这背后涉及多个组件和层面的协同工作。
+
 ## StatefulSet
 
 ### （1）网络标识
@@ -285,6 +335,52 @@ StatefulSet 与 Deployment 的唯一区别就是多了一行`serviceName: "nginx
 **最后，StatefulSet 还为每一个 Pod 分配并创建一个相同编号的 PVC。**这样，Kubernetes 就可以通过 Persistent Volume 机制为这个 PVC 绑定对应的 PV，从而保证了每个 Pod 都拥有一个独立的 Volume。
 
 在这种情况下，即使 Pod 被删除，它对应的 PVC 和 PV 依然会保留下来。所以当这个 Pod 被重新创建出来之后，Kubernetes 会为它找到编号相同的 PVC，挂载这个 PVC 对应的 Volume，从而获取以前保存在 Volume 里的数据。
+
+### 创建一个 statefulSet 的原理全流程
+
+在Kubernetes中，StatefulSet是用于管理有状态应用的工作负载API对象。与Deployment和ReplicaSet不同，StatefulSet为每个副本分配一个持久性标识符，确保Pod的重新调度或重新启动不会改变这些标识符。这对于需要稳定网络标识和持久存储的应用（如数据库）特别重要。以下是创建StatefulSet的原理全流程：
+
+##### 1. 用户提交StatefulSet的YAML配置
+
+通过执行`kubectl apply -f statefulset.yaml`，用户将StatefulSet的YAML配置文件提交给Kubernetes API Server。
+
+##### 2. API Server验证和存储
+
+API Server验证提交的YAML配置文件，并将其状态存储在etcd中。
+
+##### 3. StatefulSet Controller的响应
+
+StatefulSet Controller在API Server中监视StatefulSet资源的创建、更新和删除。当检测到新的StatefulSet对象时，Controller会开始采取行动。
+
+##### 4. Pod模板和标识符
+
+StatefulSet Controller根据StatefulSet的Pod模板创建Pod。每个Pod都被赋予一个从0开始的索引号，并且按照这个顺序依次创建和扩展。
+
+##### 5. 稳定的网络标识
+
+每个Pod都会有一个持久的、可预测的主机名，比如`web-0`, `web-1`等（如果StatefulSet的名称是`web`）。
+
+##### 6. 持久卷的创建和挂载
+
+如果StatefulSet的配置中指定了持久卷模板（PersistentVolumeClaim模板），每个Pod都会获得一个持久卷，并在Pod重新调度时保留这个持久卷。
+
+##### 7. 初始化和生命周期
+
+StatefulSet可以定义初始化容器（init containers）和生命周期钩子（lifecycle hooks）来处理应用启动和关闭时的特殊逻辑。
+
+##### 8. 服务的创建和维护
+
+通常，一个与StatefulSet关联的Headless Service会被用来暴露每个Pod实例。这个Service没有ClusterIP，允许直接访问到StatefulSet的每一个Pod。
+
+##### 9. 有序的扩展和缩容
+
+StatefulSet的扩展和缩容是有序的。当扩展时，Pod会按照从低到高的索引号顺序创建。当缩容时，高索引号的Pod会先被删除。
+
+##### 10. 状态更新和监控
+
+StatefulSet Controller会持续监控StatefulSet和其关联Pod的状态，并根据需要更新StatefulSet的状态。这些信息会被保存在API Server中，并可以通过`kubectl describe statefulset <name>`或其他API调用来查询。
+
+通过这一系列的步骤和底层组件的协作，Kubernetes能够管理和维护有状态应用，提供稳定的网络标识和持久存储。这使得Kubernetes不仅适用于无状态应用，也能处理更复杂、有状态的工作负载。
 
 ## etcd
 
