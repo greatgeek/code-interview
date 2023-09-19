@@ -508,5 +508,42 @@ c) **触发方式**：select和poll只支持水平触发（Level Triggered，缩
 
 这个例子通过日常生活中的电子邮件接收进行类比解释，希望你现在能够更好地理解水平触发和边缘触发之间的区别。
 
+## 资源共享相关技术
 
+在计算环境中，资源分配是一个关键的问题，尤其是在多任务和多用户的场景下。"CPU Share" 和 "Memory Share" 是两种用于控制资源分配的常见机制。这些机制在操作系统级别或容器化环境（如Docker、Kubernetes）中广泛应用。
+
+### CPU Share
+
+在 UNIX 和 Linux 系统中，`nice` 和 `renice` 命令允许你改变进程的优先级。在容器化环境中，CPU share 是一个更细粒度的控制手段。
+
+- **Docker**: 在 Docker 中，你可以使用 `--cpu-shares` 标志来设定容器的 CPU 使用权重。
+
+```bash
+docker run --cpu-shares=512 -it ubuntu /bin/bash
+```
+
+* **Kubernetes**: 在 Kubernetes 的 Pod 规格中，你可以设置 `resources.limits.cpu` 和 `resources.requests.cpu` 来控制 CPU 资源。
+* **Cgroups**: CPU Share 实际上是由 Linux 中的 Cgroups（Control Groups）来实现的。通过调整每个 cgroup 的 `cpu.shares` 值，可以控制 CPU 时间的分配。
+
+### Memory Share
+
+内存分配通常更为严格，因为内存不像 CPU 那样可以轻易地进行时间片共享。
+
+- **Docker**: 使用 `--memory` 标志来限制容器的内存使用。
+
+```bash
+docker run --memory=1g -it ubuntu /bin/bash
+```
+
+- **Kubernetes**: 在 Kubernetes 中，与 CPU 类似，你也可以通过设置 `resources.limits.memory` 和 `resources.requests.memory` 来控制内存资源。
+- **Cgroups**: 在 Linux 中，Cgroups 也用于内存分配。通过设置各种参数（如 `memory.limit_in_bytes`），你可以限制特定组的内存使用。
+
+### CPU Affinity
+
+CPU亲和性（CPU Affinity）是一个调度属性，用于将特定进程或线程绑定到特定的CPU核心或一组核心上。这个特性常用于性能优化和资源管理，特别是在多核或多处理器的系统中。
+
+#### 工作原理：
+
+- 在一个多核的CPU系统中，各个核心有自己的缓存。当一个进程或线程被绑定到某个特定核心上，它的数据更有可能被缓存在该核心的缓存中。
+- 绑定操作通常由操作系统的调度器进行，但也可以通过API或特定的工具进行设置。
 
