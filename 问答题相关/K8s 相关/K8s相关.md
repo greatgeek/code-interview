@@ -268,6 +268,44 @@ Service Controller 主要负责处理 `LoadBalancer` 类型的 Service 对象，
 
 通过这个全流程，Kubernetes能够确保Service不仅作为一个逻辑单元存在，还能进行有效的流量路由和负载均衡。这背后涉及多个组件和层面的协同工作。
 
+## 描述一下服务发现原理？
+
+1. Kube-proxy 通过 Service 的 Informer 感知到一个 Service 对象的添加；
+
+2. 则会在集群的所有宿主机上创建一条 iptables 规则；
+
+   1. `-A  KUBE-SERVICES -d 10.0.1.175/32 -p tcp -m comment --comment "default/hostnames:cluster IP" -m tcp --dport 80 -j KUBE-SVC-NWV5x2332I4OT4T3`;
+   2. 上述的 10.0.1.175 正是这个 Service 的 VIP。由于这只是一条 iptables 规则上的配置，并没有真正的网络设备，因此 ping 这个地址不会有任何响应；
+
+3. 上面在宿主机中创建的这条 iptable 规则，实际上是一组规则的集合，
+
+   1. ```bash
+      -A KUBE-SVC-NWV5X2332I4OT4T3 -m comment --comment "default/hostnames:" -m statistic --mode random --probability 0.33332999982 -j KUBE-SEP-WNBA2IHDGP2BOBGZ
+      -A KUBE-SVC-NWV5X2332I4OT4T3 -m comment --comment "default/hostnames:" -m statistic --mode random --probability 0.50000000000 -j KUBE-SEP-X3P2623AGDH6CDF3
+      -A KUBE-SVC-NWV5X2332I4OT4T3 -m comment --comment "default/hostnames:" -j KUBE-SEP-57KPRZ3JQVENLNBR
+      ```
+
+   2. 这 3 条链的最终目的地址就是这个 Service 代理的 3 个 Pod，所以这组规则就是 Service 实现负载均衡的位置。
+
+4. 将 Service IP NAT 到 Pod IP
+
+   1. ```bash
+      -A KUBE-SEP-57KPRZ3JQVENLNBR -s 10.244.3.6/32 -m comment --comment "default/hostnames:" -j MARK --set-xmark 0x00004000/0x00004000
+      -A KUBE-SEP-57KPRZ3JQVENLNBR -p tcp -m comment --comment "default/hostnames:" -m tcp -j DNAT --to-destination 10.244.3.6:9376
+       
+      -A KUBE-SEP-WNBA2IHDGP2BOBGZ -s 10.244.1.7/32 -m comment --comment "default/hostnames:" -j MARK --set-xmark 0x00004000/0x00004000
+      -A KUBE-SEP-WNBA2IHDGP2BOBGZ -p tcp -m comment --comment "default/hostnames:" -m tcp -j DNAT --to-destination 10.244.1.7:9376
+       
+      -A KUBE-SEP-X3P2623AGDH6CDF3 -s 10.244.2.3/32 -m comment --comment "default/hostnames:" -j MARK --set-xmark 0x00004000/0x00004000
+      -A KUBE-SEP-X3P2623AGDH6CDF3 -p tcp -m comment --comment "default/hostnames:" -m tcp -j DNAT --to-destination 10.244.2.3:9376
+      ```
+
+   2. iptables 模式，DNAT 规则的作用就是在 PREROUTING 检查点之前，也就是在路由之前，将流入 IP 包的目的地址和端口改成 --to--destination 指定的新目的地址和端口，这个目的地址和端口正是被代理 Pod 的 IP 地址和端口。
+
+   3. IPVS 模式（--proxy-mode=ipvs），kube-proxy 会通过 Linux 的 IPVS 模块为这个 IP 地址（Service IP）设置 3 台 IPVS 虚拟主机（Pod IP : Port），并设置这 3 台虚拟主机之间使用轮询模式来作为负载均衡策略。
+
+   4. 相比于 iptables，IPVS在内核中的实现其实也基于 Netfilter 的 NAT 模式，所以在转发这一层上，理论上 IPVS 并没有显著的性能提升。但是，IPVS 并不需要在宿主机上为每个 Pod 设置 iptables 规则，而是把这些“规则”的处理放到了内核态，从而极大地减少了维护这些规则的代价。
+
 ## StatefulSet
 
 ### （1）网络标识
@@ -546,4 +584,59 @@ CPU亲和性（CPU Affinity）是一个调度属性，用于将特定进程或�
 
 - 在一个多核的CPU系统中，各个核心有自己的缓存。当一个进程或线程被绑定到某个特定核心上，它的数据更有可能被缓存在该核心的缓存中。
 - 绑定操作通常由操作系统的调度器进行，但也可以通过API或特定的工具进行设置。
+
+## Pod 相关
+
+从底层实现技术的角度看，Pod 内不同容器之间共享存储和一些 namespace。具体来说，Pod 中的容器可以共享的资源有：
+
+* PID 命名空间：Pod 中的不同应用程序可以看到其他应用程序的进程 ID；
+* 网络命名空间：Pod 中的多个容器能够访问同一个 IP 和端口范围；
+* IPC 命名空间：Pod 中的多个容器能够使用 SystemV IPC 或 POSIX 消息队列进行通信；
+* UTS 命名空间：Pod 中的多个容器共享一个主机名；
+* Volumes（共享存储卷）：Pod 中的各个容器可以访问在 Pod 级别定义的存储卷；
+
+## Ingress 与 Service
+
+Ingress 是七层负载均衡器，Service 是四层负载均衡器，Ingress 是 Service 的 "Service"。
+
+### 七层负载均衡器与四层负载均衡器的区别
+
+1. 操作层级：
+   * L4 负载均衡器：工作在传输层，根据源和目标 IP 地址以及端口号来决定如何分发流量（仅使用 IP 地址则工作在网络层，使用了 IP:Port和传输协议 则工作在传输层）
+   * L7 负载均衡器：工作在应用层，可以根据 HTTP/HTTPS headers、URLs、或其他应用层信息来决定如何分发流量。
+2. 功能：
+   * L4 负载均衡器：
+     * 更为简单和快速，因为它只关注 IP、端口和传输协议。
+     * 通常支持 TCP 和 UDP 流量。
+   * L7 负载均衡器：
+     * 可以进行更复杂的流量分发，例如基于请求的内容类型、来源等。
+     * 可以进行 SSL 终止，即处理 SSL/TLS 握手。
+     * 可以对 HTTP/HTTPS 流量进行更深入的检查和路由。
+
+## IaaS、PaaS、SaaS 的区别？
+
+IaaS（Infrastructure as a Service）、PaaS（Platform as a Service）和SaaS（Software as a Service）是三种常见的云计算服务模型。每种模型都提供了不同级别的管理和自定义，以下是它们之间的主要区别：
+
+1. **IaaS (Infrastructure as a Service)**：
+    - **定义**：提供虚拟化的计算资源作为一种在线服务。用户可以租用物理设备所提供的基础计算资源。
+    - **组件**：服务器、存储、网络和操作系统。
+    - **用户控制**：用户对基础架构有较高的控制权，如操作系统、存储和部署的应用等。
+    - **示例**：Amazon EC2, Google Compute Engine, Microsoft Azure VMs。
+    - **适用场景**：对于需要完全控制其环境的企业或应用，或对于有特定、定制的需求的企业。
+
+2. **PaaS (Platform as a Service)**：
+    - **定义**：提供计算平台和解决方案堆栈作为一种服务。用户在该平台上开发、运行和管理应用程序，而无需关心基础架构。
+    - **组件**：操作系统、开发工具、数据库管理、服务器和网络。
+    - **用户控制**：用户只需要管理数据和应用程序，而基础设施和开发工具都是由服务提供商管理的。
+    - **示例**：Google App Engine, Microsoft Azure App Services, Heroku。
+    - **适用场景**：对于需要快速开发和部署应用程序，且不想管理底层基础架构的开发者或团队。
+
+3. **SaaS (Software as a Service)**：
+    - **定义**：通过Internet提供应用程序作为服务。用户通过网络访问并使用应用程序。
+    - **组件**：应用程序和数据。
+    - **用户控制**：用户对应用程序的特定功能和数据有限的控制权。底层的应用程序、数据、操作系统和基础架构都由服务提供商管理。
+    - **示例**：Google Workspace (G Suite), Microsoft Office 365, Dropbox。
+    - **适用场景**：对于那些想要即开即用的应用程序，而不需要担心安装、管理或维护的用户或组织。
+
+简而言之，从IaaS到SaaS，用户的控制权逐渐减少，而服务提供商的责任逐渐增加。选择哪种模型取决于组织的特定需求和技术专长。
 
