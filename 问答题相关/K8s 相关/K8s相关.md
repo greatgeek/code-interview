@@ -268,7 +268,7 @@ Service Controller 主要负责处理 `LoadBalancer` 类型的 Service 对象，
 
 通过这个全流程，Kubernetes能够确保Service不仅作为一个逻辑单元存在，还能进行有效的流量路由和负载均衡。这背后涉及多个组件和层面的协同工作。
 
-## 描述一下服务发现原理？
+### 描述一下服务发现原理？
 
 1. Kube-proxy 通过 Service 的 Informer 感知到一个 Service 对象的添加；
 
@@ -305,6 +305,30 @@ Service Controller 主要负责处理 `LoadBalancer` 类型的 Service 对象，
    3. IPVS 模式（--proxy-mode=ipvs），kube-proxy 会通过 Linux 的 IPVS 模块为这个 IP 地址（Service IP）设置 3 台 IPVS 虚拟主机（Pod IP : Port），并设置这 3 台虚拟主机之间使用轮询模式来作为负载均衡策略。
 
    4. 相比于 iptables，IPVS在内核中的实现其实也基于 Netfilter 的 NAT 模式，所以在转发这一层上，理论上 IPVS 并没有显著的性能提升。但是，IPVS 并不需要在宿主机上为每个 Pod 设置 iptables 规则，而是把这些“规则”的处理放到了内核态，从而极大地减少了维护这些规则的代价。
+
+## Ingress
+
+### 外部访问是会请求到哪里，然后再被 Ingress Controller 处理呢?
+
+外部访问Kubernetes集群中的服务通常会首先到达某个入口点，这个入口点是集群的网络边界，它能够接收外部流量并将其路由到集群内部。这个入口点通常是一个负载均衡器。具体如何处理取决于部署的环境和使用的Ingress Controller。
+
+以下是典型的流程：
+
+1. **外部请求**：用户或客户端发起HTTP/HTTPS请求。
+
+2. **负载均衡器**：
+   - 在云环境（如AWS, GCP, Azure等）中，当您部署一个Ingress Controller，云提供商通常会自动为您创建一个云负载均衡器。此负载均衡器的IP或主机名就是外部请求的目标。
+   - 在非云环境中，例如在物理数据中心或裸机上，您可能需要手动设置一个硬件或软件负载均衡器并将其指向Ingress Controller的Pods。
+
+3. **Ingress Controller Pods**：负载均衡器接收到请求后，会将流量转发到运行Ingress Controller的Pods。这些Pods运行Ingress Controller的实例，例如Nginx、Traefik或其他。
+
+4. **路由决策**：Ingress Controller的Pods会根据预先配置的Ingress规则进行路由决策。这些规则是基于您在Kubernetes集群中定义的Ingress资源。
+
+5. **路由到后端服务**：一旦Ingress Controller决定了正确的服务，它会将请求路由到适当的后端服务，然后该服务进一步将请求路由到后端的Pods。
+
+6. **返回响应**：Pod处理请求后，响应会回流经过相同的路径：首先通过服务，然后回到Ingress Controller，通过负载均衡器，最终返回到原始请求者。
+
+因此，简而言之，外部请求首先到达负载均衡器，然后被转发到Ingress Controller的Pods，在那里进行路由决策，并最终路由到后端的服务和Pods。
 
 ## StatefulSet
 
