@@ -166,7 +166,7 @@ Hash 在做等值查询的时候效率贼快，搜索复杂度为 O(1)。
    1. 使用 `EXPLAIN` 来分析查询，并确保选择了最佳的索引。
    2. 根据查询的 WHERE 子句和 JOIN 条件，考虑添加或修改索引。
 2. 索引覆盖率低：如果索引只覆盖查询的一部分列，那么对于未覆盖的列，MySQL 需要“回表查询”，这会导致性能降低。
-   1. 考虑使用覆盖索引，即索引包含查询中的所有列，避免“回表”操作。
+   1. 考虑使用覆盖索引，即索引包含查询中的所有列，避免“**回表**”操作。
 3. 深度分页：使用`LIMIT` 进行深度分页，如`LIMIT 10000, 10`,可能需要扫描大量的记录才能返回最后的 10 条记录。
    1. 考虑使用键值查询来获取下一页数据，而不是使用 OFFSET。
    2. 使用更复杂的查询策略，如搜索游标。
@@ -334,3 +334,113 @@ InnoDB 引擎的默认隔离级别虽然是「可重复读」，但是它很大�
 
 根据加锁的范围可分为**全局锁、表级锁和行锁**三类。
 
+## 日志篇
+
+主从复制是怎么实现的。
+
+
+
+## SQL 语句
+
+### 给你一张表，列为 id, name, class, score, 找出每个班最高分的记录
+
+使用 `GROUP BY` 来找出每个班级的最高分记录可以通过子查询或者 JOIN 操作来实现。以下是一个基于子查询的示例：
+
+```sql
+SELECT s.id, s.name, s.class, s.score
+FROM students s
+JOIN (
+    SELECT class, MAX(score) as max_score
+    FROM students
+    GROUP BY class
+) as max_scores
+ON s.class = max_scores.class AND s.score = max_scores.max_score;
+```
+
+在这个查询中：
+- 子查询首先为每个班级找到最大的分数。
+- 主查询然后通过 `JOIN` 将原始的 `students` 表与这些最大的分数进行匹配，从而找到每个班级获得最大分数的学生。
+
+需要注意的是，如果一个班级有两个或更多的学生获得相同的最高分，这个方法会返回这个班级的所有这些学生的记录。
+
+### 为我解释左连接和右连接和全连接
+
+当我们谈论关系型数据库中的 JOIN 操作时，连接（JOIN）是用于组合两个表中的行的方法。基于这两个表之间的某些列的值进行组合。左连接（LEFT JOIN）、右连接（RIGHT JOIN）和全连接（FULL JOIN）是 JOIN 操作的三种类型。下面是它们的解释：
+
+1. **左连接 (LEFT JOIN)**:
+   - 返回左表中的所有记录和右表中与之匹配的记录。
+   - 如果左表中的某条记录在右表中没有匹配的记录，则该条记录的右表列将为 NULL。
+
+   示例:
+   ```
+   Table A                Table B
+   id  name               id  desc
+   1   Apple              1   Fruit
+   2   Ball               3   Toy
+   
+   LEFT JOIN on id:
+   id  name  desc
+   1   Apple Fruit
+   2   Ball  NULL
+   ```
+
+2. **右连接 (RIGHT JOIN)**:
+   - 返回右表中的所有记录和左表中与之匹配的记录。
+   - 如果右表中的某条记录在左表中没有匹配的记录，则该条记录的左表列将为 NULL。
+
+   示例:
+   ```
+   Table A                Table B
+   id  name               id  desc
+   1   Apple              1   Fruit
+   2   Ball               3   Toy
+   
+   RIGHT JOIN on id:
+   id  name   desc
+   1   Apple  Fruit
+   3   NULL   Toy
+   ```
+
+3. **全连接 (FULL JOIN)**:
+   - 返回左表和右表中的所有记录。
+   - 如果左表中的某条记录在右表中没有匹配的记录，那么右表的列将为 NULL，反之亦然。
+
+   示例:
+   ```
+   Table A                Table B
+   id  name               id  desc
+   1   Apple              1   Fruit
+   2   Ball               3   Toy
+   
+   FULL JOIN on id:
+   id  name   desc
+   1   Apple  Fruit
+   2   Ball   NULL
+   3   NULL   Toy
+   ```
+
+需要注意的是，并不是所有的数据库系统都支持所有这三种类型的 JOIN。例如，MySQL 支持左连接和右连接，但不支持全连接。然而，你可以通过组合 LEFT JOIN 和 UNION 操作来模拟 FULL JOIN。
+
+在 `LEFT JOIN` 查询中，左表（或主表）是 `JOIN` 关键字左侧的表。具体来说，当你执行如下查询时：
+
+```sql
+SELECT s.id, s.name, sc.subject, sc.score
+FROM students s
+LEFT JOIN scores sc ON s.id = sc.student_id;
+```
+
+在这个查询中，`students` 表（别名为 `s`）是左表，而 `scores` 表（别名为 `sc`）是右表。
+
+左连接（`LEFT JOIN`）的意思是返回左表中的所有记录，以及与之匹配的右表中的记录。如果左表中的某条记录在右表中没有匹配的记录，则该条记录的右表列将为 NULL。
+
+在 `RIGHT JOIN` 查询中，右表是 `JOIN` 关键字右侧的表。具体来说，当你执行以下查询时：
+
+```sql
+SELECT s.id, s.name, sc.subject, sc.score
+FROM students s
+RIGHT JOIN scores sc ON s.id = sc.student_id;
+```
+
+在这个查询中，`students` 表（别名为 `s`）是左表，而 `scores` 表（别名为 `sc`）是右表。
+
+右连接（`RIGHT JOIN`）的意思是返回右表中的所有记录，以及与之匹配的左表中的记录。如果右表中的某条记录在左表中没有匹配的记录，则该条记录的左表列将为 NULL。
