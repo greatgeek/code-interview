@@ -664,3 +664,96 @@ IaaS（Infrastructure as a Service）、PaaS（Platform as a Service）和SaaS�
 
 简而言之，从IaaS到SaaS，用户的控制权逐渐减少，而服务提供商的责任逐渐增加。选择哪种模型取决于组织的特定需求和技术专长。
 
+## Kubernetes 中的 Initializer 是什么
+
+在 Kubernetes 中，`Initializer` 是一个特定的 admission controller，用于对新创建的资源执行一系列初始化操作，但在资源对其他系统组件可见和可调度之前。Initializer 的目标是在一个对象对其他部分的系统可见之前，对其进行一些自定义的修改或验证。这对于某些特定的配置或验证操作特别有用，这些操作可能超出了标准的 admission controller 的能力范围。
+
+**Initializer 的工作原理：**
+
+1. 当一个资源（例如 Pod）创建时，如果它匹配到 InitializerConfiguration 中定义的资源类型和选择器，那么该资源的 `metadata.initializers` 字段将会被填充。
+
+2. 这个资源在其 `metadata.initializers.pending` 列表为空之前，对集群的其他部分是不可见的。
+
+3. Initializer 控制器会观察到这个新资源，并进行相应的初始化操作。
+
+4. 初始化完成后，Initializer 控制器将自己的名称从 `metadata.initializers.pending` 列表中移除。
+
+5. 当 `metadata.initializers.pending` 列表为空时，这个资源就对其他系统组件可见了。
+
+**Initializer 的使用场景：**
+
+Initializer 可以用于多种场景，如：
+
+- 注入特定的配置到 Pod。
+  
+- 修改服务或其他资源的默认设置。
+
+- 校验资源是否满足某些特定的约束。
+
+**注意：**
+
+- 由于 Initializer 可能导致资源在完成初始化之前长时间不可用，因此应确保 Initializer 控制器的高可用性和快速响应。
+  
+- Initializer 是 Kubernetes 的一个 alpha 功能，并在某些版本中可能需要明确地启用。
+
+- Kubernetes 1.14 之后，Initializer 被认为是过时的，而 MutatingAdmissionWebhook 作为替代方案受到推荐。这是因为 Admission Webhooks 提供了更广泛和灵活的初始化和验证能力。
+
+如果你正在使用或计划使用 Kubernetes 的早期版本，并对 Initializer 感兴趣，建议详细了解其具体的功能和限制。但如果你正在使用或计划使用较新的版本，建议使用 MutatingAdmissionWebhook 和 ValidatingAdmissionWebhook 作为资源初始化和验证的方法。
+
+## 自定义的 controller 镜像是由 deployment 运行的么
+
+是的，自定义的 Kubernetes controller 通常作为 Deployment 在 Kubernetes 集群中运行。这种方法具有以下几点好处：
+
+1. **高可用性**: 通过使用 Deployment，你可以确保即使某个节点失败，controller 仍然可以运行。ReplicaSet（由 Deployment 管理）确保始终有指定数量的 controller 副本正在运行。
+
+2. **滚动更新**: 使用 Deployment，你可以方便地对 controller 进行滚动更新，从而在不中断服务的情况下更新 controller 代码或配置。
+
+3. **自动恢复**: 如果 controller 容器由于某种原因崩溃，Deployment 会确保它会自动恢复。
+
+4. **扩展**: 如果需要，可以增加 controller 的副本数以处理更多的工作负载。
+
+创建自定义 controller 时，通常会编写 controller 代码，然后将其打包为 Docker 镜像。此镜像随后可以被 Deployment 使用，部署到 Kubernetes 集群中。
+
+然后，你可以创建一个 Deployment 的 YAML 配置，指定要使用的 controller 镜像。例如：
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-custom-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: my-custom-controller
+  template:
+    metadata:
+      labels:
+        app: my-custom-controller
+    spec:
+      containers:
+      - name: my-custom-controller
+        image: myrepo/my-custom-controller:latest
+```
+
+使用 `kubectl apply -f <filename>.yaml` 可以部署这个 Deployment。
+
+## K8s 中 Operator 是如何部署和运行的
+
+Kubernetes (K8s) 中的 Operator 是一种特殊的控制器，它用于自动化部署、扩展和管理 Kubernetes 上的应用。以下是 Operator 是如何部署和运行的简短描述：
+
+1. **定义 Custom Resource (CR) 和 Custom Resource Definition (CRD)**: Operator 通常需要自定义的资源类型来表示应用或服务的特定配置和状态。这些自定义资源定义 (CRD) 允许 Operator 知道如何管理特定的应用或服务。
+
+2. **编写 Operator 逻辑**: 一旦定义了 CRD，开发者需要编写实现 Operator 逻辑的代码。这通常使用 Go 语言完成，但也可以使用其他语言。
+
+3. **构建和推送 Operator 容器镜像**: 完成 Operator 代码编写后，开发者将其打包为容器镜像，并将该镜像推送到容器镜像仓库，如 Docker Hub 或 Quay.io。
+
+4. **部署 Operator**: 使用 Kubernetes manifest (例如 Deployment) 将 Operator 容器部署到 Kubernetes 集群中。此部署将确保 Operator 控制器始终在集群中运行。
+
+5. **部署 CRD**: 在 Operator 运行之前或之后，开发者需要将之前定义的 CRD 部署到 Kubernetes 集群中。
+
+6. **创建 Custom Resource (CR)**: 用户可以通过部署自定义资源 (CR) 来告诉 Operator 如何管理应用或服务。Operator 将监视与其相关的 CR，并根据 CR 中的配置进行操作。
+
+7. **Operator 响应**: Operator 会监控它关心的资源，当这些资源发生变化时，它会执行相应的逻辑来调整应用或服务的状态，以确保其与期望的状态一致。
+
+总之，Kubernetes Operator 通过定义自定义资源类型 (CRD)、编写 Operator 逻辑、创建容器镜像并部署到集群中来运行和管理特定应用或服务。这为 Kubernetes 提供了更高级别的应用管理能力。
