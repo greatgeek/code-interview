@@ -270,6 +270,8 @@ Service Controller 主要负责处理 `LoadBalancer` 类型的 Service 对象，
 
 ### 描述一下服务发现原理？
 
+![image-20231018153137210](K8s相关.assets/image-20231018153137210-7614299.png)
+
 1. Kube-proxy 通过 Service 的 Informer 感知到一个 Service 对象的添加；
 
 2. 则会在集群的所有宿主机上创建一条 iptables 规则；
@@ -305,6 +307,58 @@ Service Controller 主要负责处理 `LoadBalancer` 类型的 Service 对象，
    3. IPVS 模式（--proxy-mode=ipvs），kube-proxy 会通过 Linux 的 IPVS 模块为这个 IP 地址（Service IP）设置 3 台 IPVS 虚拟主机（Pod IP : Port），并设置这 3 台虚拟主机之间使用轮询模式来作为负载均衡策略。
 
    4. 相比于 iptables，IPVS在内核中的实现其实也基于 Netfilter 的 NAT 模式，所以在转发这一层上，理论上 IPVS 并没有显著的性能提升。但是，IPVS 并不需要在宿主机上为每个 Pod 设置 iptables 规则，而是把这些“规则”的处理放到了内核态，从而极大地减少了维护这些规则的代价。
+
+### K8s 的网络原理
+
+#### 单机容器网络原理：
+
+docker0 网桥与虚拟设备对。
+
+![img](K8s相关.assets/3FE91870-BA6E-4AB0-BA10-2EE692071B75.png)
+
+同主机中，在容器里访问另一容器的 IP 地址时，这个 IP 地址会匹配到一条直连的路由规则，这个 IP 包会从容器的 eth0 网卡中出去，这个 eth0 网卡实际上是一个 Veth Pair 的一端，另一端插在 docker0 网桥上。IP 包到达网桥后，会由网桥转发给另一个容器。
+
+在默认情况下被限制在 Network Namespace 里的容器进程，实际上是通过 Veth Pair 设备+宿主机网桥的方式，实现了跟其他容器的数据交换。
+
+#### 跨机容器通信原理：
+
+创建一个整个集群的“公用”网桥，overlay 技术。
+
+![img](K8s相关.assets/BDBDFBB3-BC54-4EF9-9F90-14DF3ADC4CA6.png)
+
+Flannel 网络插件的三种后端实现：
+
+
+
+1. UDP
+
+   ![Flannel UDP 网络模式](K8s相关.assets/Flannel UDP 网络模式-7615338.png)
+
+   1. Flannel 插件会在启动时在主机上创建一些路由规则，其中包括流经 flannel0 设备的路由规则，flannel0 是一个 TUN 设备，连接着主机的网络协议栈与用户程序，这个 TUN 设备就是这些“隧道”的端点。
+   2. 由 Flannel 管理的容器网络里，一台主机上的所有容器都属于该主机被分配的一个“子网”。“子网”与主机的关系会被保存在 etcd中。
+   3. flanneld 进程在处理由 flannel0 传入的 IP 包时，就可以根据目的 IP 的地址，匹配到对应的子网，再从 etcd 中找到这个子网对应的主机。
+   4. Flannel UDP 模式提供的其实是一个三层的覆盖网络：它首先对发出端的 IP 包进行 UDP 封装，然后在接收端进行解封装拿到原始的 IP 包，接着把这个 IP 包转发给目标容器。就这样，Flannel 在不同主机的容器之间打通了一条“隧道”，使得这两个容器可以直接使用 IP 地址进行通信，而无须关心容器和宿主机的分布情况。
+
+2. VXLAN
+
+   ![Flannel VXLAN 网络模式](K8s相关.assets/Flannel VXLAN 网络模式.png)
+
+   1. Flannel 插件会地启动时在主机上创建一些路由规则，其中包括流经 flannel1.1 设备的路由规则，flannel1.1 是一个 VTEP 设备，VTEP 设备就是这些“隧道”的端点。
+   2. VTEP 与 TUN 设备非常类似，只不过 VTEP 设备进行封装与解封的是二层数据帧；
+   3. 当“源 VTEP设备”需要发送一个“原始 IP 包”时，会需要给它加上一个目的 MAC 地址，将其封装成一个二层数据帧，然后再发送给“目的 VTEP设备”，在这个过程中 flannel1.1 设备扮演的其实是一个“网桥的角色”，会根据 FDB 转发数据库进行转发。每个节点启动时把它的 VTEP 设备对应的 ARP 记录直接下放到其他每台宿主机上。
+
+3. host-gw
+
+   ![Flannel host-gw 网络模式](K8s相关.assets/Flannel host-gw 网络模式-7615520.png)
+
+   1. host-gw 模式的工作原理是将每个 Flannel 子网的下一跳设置成了该子网对应的宿主机的 IP 地址。这台“主机”会充当这条容器通信路径里的“网关”。
+   2. /proc/sys/net/ipv4/ip_forward，这个在 Linux 中控制系统的 IP 转发功能。
+
+K8s 中网络隔离功能的实现原理：
+
+网络插件会使用对 NetworkPolicy 的定义，在宿主机上生成 iptables 规则。匹配到对应的规则后，决定将该 IP 包 Accept，还是 Drop。
+
+iptalbes 只是一个操作 Linux 内核 Netfilter 子系统的“界面”。Netfilter 子系统的作用相当于 Linux 内核里挡在“网卡”和“用户进程”之间的一道“防火墙”。
 
 ## Ingress
 
